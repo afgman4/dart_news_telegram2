@@ -21,10 +21,12 @@
   "homepage": "https://github.com/afgman4/naver_stock_news_telegram#readme",
   "dependencies": {
     "adm-zip": "^0.5.16",
-    "axios": "^0.19.2",
-    "cheerio": "^1.0.0-rc.3",
+    "axios": "^1.13.4",
+    "axios-cookiejar-support": "^6.0.5",
+    "cheerio": "^1.2.0",
     "iconv-lite": "^0.5.1",
-    "moment": "^2.26.0",
-    "node-telegram-bot-api": "^0.50.0"
+    "moment": "^2.30.1",
+    "node-telegram-bot-api": "^0.50.0",
+    "tough-cookie": "^6.0.0"
   }
 }

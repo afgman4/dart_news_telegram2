@@ -2,12 +2,13 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const moment = require('moment');
 const AdmZip = require('adm-zip');
+const cheerio = require('cheerio'); // <--- 이 줄을 꼭 추가하세요!
 
 /* ======================
-    🔑 기본 설정
+    🔑 기본 설정 (반드시 본인 것으로 변경)
 ====================== */
-const TELEGRAM_TOKEN = 'YOUR_TELEGRAM_TOKEN';
-const DART_API_KEY = 'YOUR_DART_API_KEY';
+const TELEGRAM_TOKEN = '';
+const DART_API_KEY = '';
 const DART_LIST_URL = 'https://opendart.fss.or.kr/api/list.json';
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
@@ -18,10 +19,9 @@ let targetChatId = null;
 const sentSet = new Set();
 
 /* ======================
-    🔥 지능형 필터링 및 키워드 (실적 키워드 보강)
+    🔥 지능형 필터링 및 키워드
 ====================== */
-// '매출액', '손익구조' 추가
-const GOOD_REGEX = /단일판매|공급계약|무상증자|특허권|자기주식|제3자배정|양수도|투자판단|주요경영사항|기타\s*시장\s*안내|임상|FDA|승인|허가|기술이전|샌드박스|로봇|AI|탈모|신약|매출액|손익구조|영업실적/i;
+const GOOD_REGEX = /단일판매|공급계약|무상증자|특허권|제3자배정|양수도|투자판단|주요경영사항|기타\s*시장\s*안내|임상|FDA|승인|허가|기술이전|샌드박스|로봇|AI|탈모|신약|매출액|손익구조|영업실적/i;
 const BAD_REGEX = /(주식처분|신탁계약|계획|예정|정정|자회사|검토|가능성|기대|준비중|추진)/i;
 const SUPER_INVESTORS = /삼성|현대|기아|LG|SK|한화|네이버|NAVER|카카오|KAKAO|포스코/i;
 
@@ -45,18 +45,7 @@ function extractHotKeyword(title, detail) {
 }
 
 /* ======================
-    ⏰ 장 시간 체크
-====================== */
-function isMarketOpen() {
-    const now = new Date();
-    const day = now.getDay();
-    const currentTime = now.getHours() * 100 + now.getMinutes();
-    if (day === 0 || day === 6) return false;
-    return currentTime >= 830 && currentTime <= 1800; 
-}
-
-/* ======================
-    🔍 본문 추출 및 정제
+    🔍 본문 추출 및 정제 (ZIP 지원)
 ====================== */
 async function getDartDetail(rcpNo) {
     const apiUrl = `https://opendart.fss.or.kr/api/document.xml?crtfc_key=${DART_API_KEY}&rcept_no=${rcpNo}`;
@@ -74,9 +63,9 @@ async function getDartDetail(rcpNo) {
 
         let text = content
             .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "") 
-            .replace(/<[^>]*>?/g, " ")                     
-            .replace(/&nbsp;/g, " ")                       
-            .replace(/\s+/g, " ")                          
+            .replace(/<[^>]*>?/g, " ") 
+            .replace(/&nbsp;/g, " ") 
+            .replace(/\s+/g, " ") 
             .trim();
 
         text = text.replace(/[^가-힣ㄱ-ㅎㅏ-ㅣa-zA-Z0-9.\s%()\[\]:,-]/g, "");
@@ -87,152 +76,234 @@ async function getDartDetail(rcpNo) {
 }
 
 /* ======================
-    🚀 통합 스캔 엔진 (페이징 + 실적로직 통합)
-===================== */
-async function scanDart(totalCount = 10, isTest = false, startDate = null, endDate = null) {
-    if (!targetChatId) return;
-    const logTime = moment().format('HH:mm:ss');
-
-    if (!isTest && !isMarketOpen()) return;
-
+    📊 실적 HTML 파싱 함수
+====================== */
+async function getEarningsFromMainPage(rcpNo) {
     try {
-        const limitPerPage = 100;
-        const totalPages = Math.ceil(totalCount / limitPerPage);
-        let allList = [];
+        // 1. OpenDART 본문 API 호출 (결과는 ZIP 파일 바이너리)
+        const url = `https://opendart.fss.or.kr/api/document.xml?crtfc_key=${DART_API_KEY}&rcept_no=${rcpNo}`;
+        
+        const response = await axios.get(url, { 
+            responseType: 'arraybuffer', // 바이너리 데이터로 받기
+            timeout: 15000 
+        });
 
-        for (let page = 1; page <= totalPages; page++) {
-            const params = { crtfc_key: DART_API_KEY, page_count: limitPerPage, page_no: page };
-            if (startDate) params.bgn_de = startDate;
-            if (endDate) params.end_de = endDate;
+        // 2. ZIP 압축 해제
+        const zip = new AdmZip(Buffer.from(response.data));
+        const zipEntries = zip.getEntries();
+        
+        // 첫 번째 엔트리가 보통 메인 HTML 문서입니다.
+        let htmlContent = zipEntries[0].getData().toString('utf8');
+        
+        // 3. Cheerio로 실적 데이터 파싱
+        const $ = cheerio.load(htmlContent);
+        let revenue = null, op = null, net = null;
 
-            const res = await axios.get(DART_LIST_URL, { params, timeout: 10000 });
-            if (res.data.status === '000' && res.data.list) {
-                allList = allList.concat(res.data.list);
-            } else break;
-            await new Promise(r => setTimeout(r, 100));
-        }
+        // 실적 공시(매출액또는손익구조변경)는 보통 특정 테이블에 값이 몰려있습니다.
+        $('table').each((_, table) => {
+            const rows = $(table).find('tr');
+            rows.each((__, tr) => {
+                const tds = $(tr).find('td');
+                if (tds.length >= 4) {
+                    // 텍스트 정제 (공백 제거)
+                    const title = $(tds[0]).text().replace(/\s/g, '');
+                    
+                    // 증감률 컬럼 (보통 5번째 칸에 해당하며, % 문자가 포함된 칸을 우선 탐색)
+                    let ratio = "";
+                    $(tds).each((i, td) => {
+                        const txt = $(td).text().trim();
+                        if (txt.includes('%') || (i >= 4 && /^-?[\d,.]+$/.test(txt))) {
+                            ratio = txt;
+                        }
+                    });
 
-        const list = allList.reverse();
-
-        for (const item of list) {
-            const { report_nm: title, corp_name: corp, rcept_no: rcpNo } = item;
-            const key = `${corp}_${rcpNo}`;
-            const currentTime = moment().format('HH:mm:ss');
-
-            if (!isTest && sentSet.has(key)) continue;
-
-            // 1차 필터링
-            if (!GOOD_REGEX.test(title) || BAD_REGEX.test(title)) {
-                if(isTest) console.log(` [제외] [${currentTime}][${corp}] ${title}`);
-                continue;
-            }
-
-            const docDetail = await getDartDetail(rcpNo);
-            let isPass = false;
-            let extraInfo = "";
-            let tag = extractHotKeyword(title, docDetail);
-
-            // [로직 1] 수주/공급계약
-            if (title.includes("단일판매") || title.includes("공급계약")) {
-                const ratioMatch = docDetail.match(/매출액\s*대비\s*\(?\s*%\s*\)?\s*([\d.]+)/i);
-                if (ratioMatch) {
-                    const ratio = parseFloat(ratioMatch[1]);
-                    if (ratio >= 30 && ratio < 1000) { 
-                        isPass = true;
-                        extraInfo = ratio >= 70 ? `\n🔴🔴 <b>[대형수주] 매출액 대비 ${ratio}%!</b>` : `\n🔴 <b>[수주] 매출액 대비 ${ratio}%</b>`;
-                    }
-                } else if (title.includes("기재정정")) {
-                    isPass = true;
-                    extraInfo = `\n🔄 <b>수주 내용 정정 공시</b>`;
+                    if (title.includes('매출액')) revenue = ratio;
+                    if (title.includes('영업이익')) op = ratio;
+                    if (title.includes('당기순이익')) net = ratio;
                 }
-            }
-            // [로직 2] 실적 분석 (신규 통합)
-            else if (title.includes("매출액") || title.includes("손익구조") || title.includes("영업실적")) {
-                const opRatioMatch = docDetail.match(/영업이익[^\d]*[\d,.-]+[^\d]*[\d,.-]+[^\d]*[\d,.-]+[^\d]*([\d,.-]+)/);
-                const isTurnaround = docDetail.includes("흑자전환");
+            });
+            if (revenue || op || net) return false; // 데이터를 찾았으면 중환
+        });
 
-                if (opRatioMatch || isTurnaround) {
-                    const opRatio = opRatioMatch ? parseFloat(opRatioMatch[1].replace(/,/g, '')) : 0;
-                    if (opRatio >= 50 || isTurnaround) {
+        return { revenue, op, net };
+    } catch (e) {
+        console.error(`[API 본문추출 실패] rcpNo: ${rcpNo}, Error: ${e.message}`);
+        return {};
+    }
+}
+
+
+
+
+
+/* ======================
+    ⏰ 장 시간 체크 함수
+====================== */
+function isMarketOpen() {
+    const now = new Date();
+    const day = now.getDay();
+    const currentTime = now.getHours() * 100 + now.getMinutes();
+
+    // 토요일(6), 일요일(0)은 장이 열리지 않음
+    if (day === 0 || day === 6) return false;
+
+    // 한국 시간 기준 08:30 ~ 18:00 (시간외 거래 포함)
+    return currentTime >= 830 && currentTime <= 2400;
+}
+/* ======================
+    🚀 통합 스캔 엔진 (오류 수정 및 로직 최적화)
+===================== */
+async function scanDart(totalCount = 10, isTest = false, targetDate = null) {
+    if (!targetChatId) return;
+    const dateStr = targetDate || moment().format('YYYYMMDD');
+    const limitPerPage = 100;
+    const totalPages = Math.ceil(totalCount / limitPerPage);
+
+    for (let page = 1; page <= totalPages; page++) {
+        try {
+            const params = {
+                crtfc_key: DART_API_KEY,
+                page_count: limitPerPage,
+                page_no: page,
+                bgn_de: dateStr,
+                end_de: dateStr
+            };
+
+            const res = await axios.get(DART_LIST_URL, { params, timeout: 15000 });
+            if (!res.data.list || res.data.list.length === 0) break;
+
+            const list = isTest ? res.data.list : res.data.list.reverse();
+
+            for (const item of list) {
+                // 1. 변수명 통일 (title, corp, rcpNo 사용)
+                const { report_nm: title, corp_name: corp, rcept_no: rcpNo } = item;
+                const key = `${corp}_${rcpNo}`;
+
+                if (!isTest && sentSet.has(key)) continue;
+
+                // 2. 1차 제목 필터링
+                if (!GOOD_REGEX.test(title) || BAD_REGEX.test(title)) continue;
+
+                let isPass = false;
+                let extraInfo = "";
+                let tag = "";
+
+                /* -------------------------------------------
+                   [분기 1] 실적 공시 처리
+                ------------------------------------------- */
+                if (/매출액|손익구조|영업실적/.test(title)) {
+                    if (isMarketOpen() && !isTest) continue;
+
+                    const e = await getEarningsFromMainPage(rcpNo);
+                    if (!e.revenue && !e.op && !e.net) continue;
+
+                    if( (e.op.trim() === '' || Math.abs(parseFloat(e.op)) < 100)){
+                        continue;
+                    }else if( (e.net.trim() === '' || Math.abs(parseFloat(e.net)) < 100)){
+                        continue;
+                    }
+
+                    await bot.sendMessage(targetChatId, `
+🚨 <b>[DART 💰 실적발표]</b>
+
+🏢 <b>${corp}</b>
+📄 ${title}
+
+📈 매출액: <b>${e.revenue ?? '-'}%</b>
+📉 영업이익: <b>${e.op ?? '-'}%</b>
+📉 순이익: <b>${e.net ?? '-'}%</b>
+
+🔗 <a href="https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rcpNo}">원문보기</a>
+`, { parse_mode: 'HTML', disable_web_page_preview: true });
+                    isPass = false; // 위에서 직접 보냈으므로 하단 공통 전송은 pass
+                } 
+                
+                /* -------------------------------------------
+                   [분기 2] 공급계약 / 바이오 / 투자 등 일반 호재
+                ------------------------------------------- */
+                else {
+                    const docDetail = await getDartDetail(rcpNo);
+                    tag = extractHotKeyword(title, docDetail);
+
+                    // A. 공급계약 정밀 분석
+                    if (title.includes("단일판매") || title.includes("공급계약")) {
+                        const ratioMatch = docDetail.match(/매출액\s*대비\s*\(?\s*%\s*\)?\s*([\d.]+)/i);
+                        const contractorMatch = docDetail.match(/계약상대방\s*[:\s-]*\s*([가-힣\w\s(株)\(\)]{2,})/i);
+                        
+                        if (ratioMatch) {
+                            const ratio = parseFloat(ratioMatch[1]);
+                            const contractor = contractorMatch ? contractorMatch[1].trim().split("회사와의")[0] : "확인불가";
+                            
+                            if (ratio >= 30) {
+                                isPass = true;
+                                extraInfo = `\n\n💰 <b>계약상대:</b> ${contractor}`;
+                                extraInfo += ratio >= 70 
+                                    ? `\n🔴🔴 <b>[대형수주] 매출액 대비 ${ratio}%!</b>` 
+                                    : `\n🔴 <b>[수주] 매출액 대비 ${ratio}%</b>`;
+                            }
+                        }
+                    }
+                    // B. 바이오/기술/로봇 (키워드 매칭)
+                    else if (HOT_KEYWORDS.test(title + docDetail)) {
                         isPass = true;
-                        extraInfo = isTurnaround ? `\n💰 <b>[실적] ★흑자전환 성공★</b>` : `\n💰 <b>[실적 어닝서프] 영업이익 ${opRatio}% 증가!</b>`;
+                        const isSuccess = /통계적\s*유의성|확보|달성|성공|탑라인/.test(docDetail + title);
+                        extraInfo = isSuccess ? `\n🔥 <b>[핵심 결과 발표] 데이터 유의성 확보</b>` : `\n🧬 <b>[바이오/기술] 공시 감지</b>`;
+                    }
+                    // C. 대기업 투자유치 / M&A
+                    else if (title.includes("양수도") || title.includes("최대주주") || title.includes("제3자배정")) {
+                        isPass = true;
+                        const match = docDetail.match(/(?:양수인|배정대상자)\s*[:\s-]*\s*([가-힣\w\s(株)\(\)]{2,})/i);
+                        let player = match ? match[1].trim().split("(")[0].trim() : "본문 참조";
+                        extraInfo = SUPER_INVESTORS.test(player) ? `\n💎 <b>[특급 투자자: ${player}]</b>` : `\n🤝 <b>[투자 유치: ${player}]</b>`;
+                    }
+
+                    // 최종 전송 (일반 호재일 경우만)
+                    if (isPass) {
+                        const link = `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rcpNo}`;
+                        await bot.sendMessage(targetChatId,
+                            `🚨 <b>[DART ${tag}]</b>\n\n🏢 <b>기업명:</b> ${corp}\n📄 <b>공시제목:</b> ${title}${extraInfo}\n\n🔗 <a href="${link}">원문 보기</a>`,
+                            { parse_mode: 'HTML', disable_web_page_preview: true }
+                        );
                     }
                 }
-            }
-            // [로직 3] 바이오/기술
-            else if (title.includes("임상") || title.includes("CSR") || HOT_KEYWORDS.test(title + docDetail)) {
-                isPass = true;
-                const isSuccess = /통계적\s*유의성|확보|달성|성공|탑라인/.test(docDetail + title);
-                extraInfo = isSuccess ? `\n🔥 <b>[핵심 결과 발표] 데이터 유의성 확보</b>` : `\n🧬 <b>[바이오/기술] 공시 감지</b>`;
-            }
-            // [로직 4] 투자/M&A
-            else if (title.includes("양수도") || title.includes("최대주주") || title.includes("제3자배정")) {
-                isPass = true;
-                const match = docDetail.match(/(?:양수인|배정대상자)\s*[:\s-]*\s*([가-힣\w\s(株)\(\)]{2,})/i);
-                let player = match ? match[1].trim().split("회사와의")[0].split("(")[0].trim() : "본문 참조";
-                extraInfo = SUPER_INVESTORS.test(player) ? `\n💎 <b>[특급 투자자: ${player}]</b>` : `\n🤝 <b>[투자 유치: ${player}]</b>`;
-            }
 
-            if (!isPass) continue;
-
-            if (!isTest) sentSet.add(key);
-            const link = `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rcpNo}`;
-            await bot.sendMessage(targetChatId,
-                `🚨 <b>[DART 호재 감지]</b>\n\n🏢 <b>기업명:</b> ${corp}\n📄 <b>공시제목:</b> ${title}\n🏷️ <b>분류:</b> ${tag}${extraInfo}\n\n🔗 <a href="${link}">원문 보기</a>`,
-                { parse_mode: 'HTML', disable_web_page_preview: true }
-            );
+                if (!isTest) sentSet.add(key);
+                await new Promise(res => setTimeout(res, 400)); // 도배 방지
+            }
+        } catch (e) {
+            console.error(`Page ${page} 스캔 중 에러 발생: ${e.message}`);
         }
-    } catch (e) { console.error(`[Error] ${e.message}`); }
+    }
 }
 
 /* ======================
-    🤖 명령어 처리 (Help 포함)
+    🤖 명령어 처리
 ====================== */
-bot.onText(/\/help/, (msg) => {
-    const helpMsg = `
-🔍 <b>DART 모니터링 봇 사용법</b>
-
-🚀 <code>/on</code> : 실시간 모니터링 시작
-🛑 <code>/off</code> : 모니터링 중지
-📊 <code>/test1000</code> : 최근 1,000건 시뮬레이션
-🧬 <code>/test_curacle</code> : 바이오 정밀 분석 테스트
-
-💡 <b>알림 조건:</b>
-• 영업이익 30%↑ 또는 흑자전환
-• 매출액 대비 20%↑ 공급계약
-• 임상 성공/유의성 확보
-• 대기업(삼성, LG 등)의 투자 유치
-    `;
-    bot.sendMessage(msg.chat.id, helpMsg, { parse_mode: 'HTML' });
-});
-
 bot.onText(/\/on/, (msg) => {
     targetChatId = msg.chat.id;
     if (!isMonitoring) {
         isMonitoring = true;
-        bot.sendMessage(targetChatId, "🚀 <b>지능형 모니터링 가동 시작</b>");
-        monitorTimer = setInterval(() => scanDart(10, false), 5000);
+        bot.sendMessage(targetChatId, "🚀 <b>실시간 모니터링 가동 시작</b>");
+        // 15초마다 최신 15건 스캔
+        monitorTimer = setInterval(() => scanDart(15, false), 15000);
     }
 });
 
 bot.onText(/\/off/, (msg) => {
-    isMonitoring = false; clearInterval(monitorTimer);
+    isMonitoring = false;
+    clearInterval(monitorTimer);
     bot.sendMessage(msg.chat.id, "🛑 <b>모니터링 중지</b>");
 });
 
-bot.onText(/\/test1000/, async (msg) => {
+// /test1000 [날짜] 명령어 처리
+bot.onText(/\/test1000(?:\s+(\d{8}))?/, async (msg, match) => {
     targetChatId = msg.chat.id;
-    const end = moment().format('YYYYMMDD');
-    const bgn = moment().subtract(3, 'days').format('YYYYMMDD'); 
-    bot.sendMessage(targetChatId, `📊 <b>1,000건 시뮬레이션 시작...</b>`);
-    await scanDart(1000, true, bgn, end);
+    const testDate = match[1] || moment().format('YYYYMMDD');
+    bot.sendMessage(targetChatId, `📊 <b>${testDate}</b> 기준 1,000건 시뮬레이션 시작...`);
+    await scanDart(1000, true, testDate);
     bot.sendMessage(targetChatId, `✅ <b>시뮬레이션 완료</b>`);
 });
 
-bot.onText(/\/test_curacle/, async (msg) => {
-    const curacleRcpNo = "20260120900209"; 
-    targetChatId = msg.chat.id;
-    bot.sendMessage(targetChatId, `🧬 <b>큐라클 임상 결과 정밀 분석 테스트 시작...</b>`);
-    // 이 부분은 위 scanDart 로직 내에서 curacleRcpNo를 처리하도록 설계되었습니다.
-    // 기존에 별도로 있던 테스트 코드를 유지하고 싶으시면 그대로 붙여넣으셔도 무방합니다.
-});
+bot.on('polling_error', (err) => console.log('Polling Error:', err.code));
+
+console.log('🚀 DART Intelligent Bot is Online...');
