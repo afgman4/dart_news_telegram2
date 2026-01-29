@@ -7,8 +7,8 @@ const cheerio = require('cheerio'); // <--- 이 줄을 꼭 추가하세요!
 /* ======================
     🔑 기본 설정 (반드시 본인 것으로 변경)
 ====================== */
-const TELEGRAM_TOKEN = '8588189807:AAEn8ZQOqS6XsIQ5E5tYKS9d1_Z20Qm2QB0';
-const DART_API_KEY = 'f248b42062220d73d89ab0fa0f152f231b082bf4';
+const TELEGRAM_TOKEN = '';
+const DART_API_KEY = '';
 const DART_LIST_URL = 'https://opendart.fss.or.kr/api/list.json';
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
