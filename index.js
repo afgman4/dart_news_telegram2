@@ -203,7 +203,7 @@ function isMarketOpen() {
     if (day === 0 || day === 6) return false;
 
     // 한국 시간 기준 08:30 ~ 18:00 (시간외 거래 포함)
-    return currentTime >= 830 && currentTime <= 2400;
+    return currentTime >= 830 && currentTime <= 2030;
 }
 /* ======================
     🚀 통합 스캔 엔진 (오류 수정 및 로직 최적화)
@@ -233,6 +233,8 @@ async function scanDart(totalCount = 10, isTest = false, targetDate = null) {
                 // 1. 변수명 통일 (title, corp, rcpNo 사용)
                 const { report_nm: title, corp_name: corp, rcept_no: rcpNo } = item;
                 const key = `${corp}_${rcpNo}`;
+
+                console.log(`[스캔중] ${corp} - ${title}`);
 
                 if (!isTest && sentSet.has(key)) continue;
 
