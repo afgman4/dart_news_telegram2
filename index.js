@@ -16,6 +16,7 @@ const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 let isMonitoring = false;
 let monitorTimer = null;
 let targetChatId = null;
+let lastMarketStatus = true; // 장 상태 변화 감지용
 const sentSet = new Set();
 
 /* ======================
@@ -210,6 +211,20 @@ function isMarketOpen() {
 ===================== */
 async function scanDart(totalCount = 10, isTest = false, targetDate = null) {
     if (!targetChatId) return;
+
+    // 장 시간 체크 (테스트 모드가 아닐 때만)
+    if (!isTest && !isMarketOpen()) {
+        if (lastMarketStatus === true) { // 장이 열려있다가 닫힌 직후 한 번만 알림
+            const timeNow = moment().format('HH:mm:ss');
+            console.log(`[${timeNow}] 장시간 종료로 스캔 건너뜀`);
+            bot.sendMessage(targetChatId, `😴 <b>현재 장 시간이 아닙니다.</b>\n(08:30 ~ 20:30 외 시간에는 데이터 추출을 중단합니다.)`);
+            lastMarketStatus = false;
+        }
+        return;
+    }
+    lastMarketStatus = true; // 장 시간 내라면 상태 초기화
+
+
     const dateStr = targetDate || moment().format('YYYYMMDD');
     const limitPerPage = 100;
     const totalPages = Math.ceil(totalCount / limitPerPage);
@@ -234,7 +249,9 @@ async function scanDart(totalCount = 10, isTest = false, targetDate = null) {
                 const { report_nm: title, corp_name: corp, rcept_no: rcpNo } = item;
                 const key = `${corp}_${rcpNo}`;
 
-                console.log(`[스캔중] ${corp} - ${title}`);
+                const timeNow = moment().format('HH:mm:ss');
+
+                console.log(`[${timeNow}] [스캔중] ${corp} - ${title}`);
 
                 if (!isTest && sentSet.has(key)) continue;
 
@@ -348,6 +365,7 @@ bot.onText(/\/on/, (msg) => {
     targetChatId = msg.chat.id;
     if (!isMonitoring) {
         isMonitoring = true;
+        lastMarketStatus = true; // 켤 때 상태 초기화
         bot.sendMessage(targetChatId, "🚀 <b>실시간 모니터링 가동 시작</b>");
         // 15초마다 최신 15건 스캔
         monitorTimer = setInterval(() => scanDart(15, false), 15000);
