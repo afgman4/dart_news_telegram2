@@ -7,8 +7,8 @@ const cheerio = require('cheerio'); // <--- 이 줄을 꼭 추가하세요!
 /* ======================
     🔑 기본 설정 (반드시 본인 것으로 변경)
 ====================== */
-const TELEGRAM_TOKEN = '';
-const DART_API_KEY = '';
+const TELEGRAM_TOKEN = '8588189807:AAEn8ZQOqS6XsIQ5E5tYKS9d1_Z20Qm2QB0';
+const DART_API_KEY = 'f248b42062220d73d89ab0fa0f152f231b082bf4';
 const DART_LIST_URL = 'https://opendart.fss.or.kr/api/list.json';
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
@@ -22,7 +22,7 @@ const sentSet = new Set();
     🔥 지능형 필터링 및 키워드
 ====================== */
 const GOOD_REGEX = /단일판매|공급계약|무상증자|특허권|제3자배정|양수도|투자판단|주요경영사항|기타\s*시장\s*안내|임상|FDA|승인|허가|기술이전|샌드박스|로봇|AI|탈모|신약|매출액|손익구조|영업실적/i;
-const BAD_REGEX = /(주식처분|신탁계약|계획|예정|정정|자회사|검토|가능성|기대|준비중|추진)/i;
+const BAD_REGEX = /(주식처분|신탁계약|계획|예정|정정|정지|해제|자회사|검토|가능성|기대|증권발행결과|준비중|추진)/i;
 const SUPER_INVESTORS = /삼성|현대|기아|LG|SK|한화|네이버|NAVER|카카오|KAKAO|포스코/i;
 
 const HOT_KEYWORDS = new RegExp([
@@ -78,6 +78,7 @@ async function getDartDetail(rcpNo) {
 /* ======================
     📊 실적 HTML 파싱 함수
 ====================== */
+
 async function getEarningsFromMainPage(rcpNo) {
     try {
         // 1. OpenDART 본문 API 호출 (결과는 ZIP 파일 바이너리)
@@ -133,7 +134,61 @@ async function getEarningsFromMainPage(rcpNo) {
 }
 
 
+async function getBioNewFromOpenDart(rcpNo) {
+    
+    // 1. OpenDART 본문 API 호출 (결과는 ZIP 파일 바이너리)
+    const url = `https://opendart.fss.or.kr/api/document.xml?crtfc_key=${DART_API_KEY}&rcept_no=${rcpNo}`;
+    
+    const response = await axios.get(url, { 
+        responseType: 'arraybuffer', // 바이너리 데이터로 받기
+        timeout: 15000 
+    });
 
+    // 2. ZIP 압축 해제
+    const zip = new AdmZip(Buffer.from(response.data));
+    const zipEntries = zip.getEntries();
+    
+    // 첫 번째 엔트리가 보통 메인 HTML 문서입니다.
+    let htmlContent = zipEntries[0].getData().toString('utf8');
+        
+    const $ = cheerio.load(htmlContent);
+    let clinicalResult = "";
+
+    // 바이오 임상 결과값 섹션 타겟팅
+    $('tr').each((_, tr) => {
+        const tds = $(tr).find('td');
+        // '결과값' 혹은 '시험결과'라는 단어가 포함된 행을 찾음
+        const rowTitle = $(tds[0]).text().replace(/\s/g, '');
+        const nextTitle = $(tds[1]) ? $(tds[1]).text().replace(/\s/g, '') : "";
+
+        if (rowTitle.includes("결과값") || nextTitle.includes("결과값")) {
+            clinicalResult = $(tds).last().text().trim();
+            return false; // 찾으면 루프 종료
+        }
+    });
+
+    // 만약 표 구조에서 못 찾았다면 '시험결과' 섹션 이후의 텍스트를 탐색
+    if (!clinicalResult) {
+        clinicalResult = $("span:contains('결과값')").parent().next().text().trim() || 
+                         $("td:contains('결과값')").next().text().trim();
+    }
+
+    // 핵심 문구 요약 (중대한 이상반응 여부 등)
+    let summary = "";
+    if (clinicalResult) {
+        const lines = clinicalResult.split('\n');
+        // "보고되지 않았습니다", "유의미한 변화", "확보" 등의 핵심 문장이 포함된 라인만 필터링
+        const keyLines = lines.filter(line => 
+            /중대한 이상반응|SAE|이상사례|관찰되지 않았습니다|유의적|성공|뒷받침/.test(line)
+        );
+        summary = keyLines.length > 0 ? keyLines.join('\n').trim() : clinicalResult.substring(0, 200);
+    }
+
+    return { 
+        // ... 기존 실적 데이터 ...
+        clinicalResult: summary 
+    };
+}
 
 
 /* ======================
@@ -199,7 +254,8 @@ async function scanDart(totalCount = 10, isTest = false, targetDate = null) {
 
                     if( (e.op.trim() === '' || Math.abs(parseFloat(e.op)) < 100)){
                         continue;
-                    }else if( (e.net.trim() === '' || Math.abs(parseFloat(e.net)) < 100)){
+                    }else
+                    if( (e.net.trim() === '' || Math.abs(parseFloat(e.net)) < 100)){
                         continue;
                     }
 
@@ -244,10 +300,17 @@ async function scanDart(totalCount = 10, isTest = false, targetDate = null) {
                         }
                     }
                     // B. 바이오/기술/로봇 (키워드 매칭)
-                    else if (HOT_KEYWORDS.test(title + docDetail)) {
+                    else if (HOT_KEYWORDS.test(title)) {
                         isPass = true;
-                        const isSuccess = /통계적\s*유의성|확보|달성|성공|탑라인/.test(docDetail + title);
-                        extraInfo = isSuccess ? `\n🔥 <b>[핵심 결과 발표] 데이터 유의성 확보</b>` : `\n🧬 <b>[바이오/기술] 공시 감지</b>`;
+                        const bioInfo = await getBioNewFromOpenDart(rcpNo);
+                        const resultText = bioInfo.clinicalResult || "";
+
+                        // .match는 문자열인 resultText에서 수행해야 합니다.
+                        const isSuccess = /통계적\s*유의성|확보|달성|성공|탑라인/i.test(resultText);
+
+                        extraInfo = isSuccess 
+                            ? `\n🔥 <b>[핵심 결과 발표] 데이터 유의성 확보</b>\n📝 <b>내용:</b> ${resultText.slice(0, 1000)}...` 
+                            : `\n🧬 <b>[바이오/기술] 공시 감지</b>\n📝 <b>내용:</b> ${resultText.slice(0, 300)}...`;
                     }
                     // C. 대기업 투자유치 / M&A
                     else if (title.includes("양수도") || title.includes("최대주주") || title.includes("제3자배정")) {
