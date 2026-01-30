@@ -23,7 +23,7 @@ const sentSet = new Set();
     🔥 지능형 필터링 및 키워드
 ====================== */
 const GOOD_REGEX = /단일판매|공급계약|무상증자|특허권|제3자배정|양수도|투자판단|주요경영사항|기타\s*시장\s*안내|임상|FDA|승인|허가|기술이전|샌드박스|로봇|AI|탈모|신약|매출액|손익구조|영업실적/i;
-const BAD_REGEX = /(주식처분|신탁계약|계획|예정|정정|정지|해제|자회사|검토|가능성|기대|증권발행결과|준비중|추진)/i;
+const BAD_REGEX = /(주식처분|신탁계약|계획|예정|정정|정지|상장적격성|최대주주의의무보유관련|해제|자회사|자본잠식|합병등종료보고서|기업심사위원회|검토|가능성|기대|증권발행결과|준비중|추진)/i;
 const SUPER_INVESTORS = /삼성|현대|기아|LG|SK|한화|네이버|NAVER|카카오|KAKAO|포스코/i;
 
 const HOT_KEYWORDS = new RegExp([
@@ -79,58 +79,72 @@ async function getDartDetail(rcpNo) {
 /* ======================
     📊 실적 HTML 파싱 함수
 ====================== */
-
 async function getEarningsFromMainPage(rcpNo) {
     try {
-        // 1. OpenDART 본문 API 호출 (결과는 ZIP 파일 바이너리)
         const url = `https://opendart.fss.or.kr/api/document.xml?crtfc_key=${DART_API_KEY}&rcept_no=${rcpNo}`;
         
         const response = await axios.get(url, { 
-            responseType: 'arraybuffer', // 바이너리 데이터로 받기
+            responseType: 'arraybuffer', 
             timeout: 15000 
         });
 
-        // 2. ZIP 압축 해제
         const zip = new AdmZip(Buffer.from(response.data));
         const zipEntries = zip.getEntries();
-        
-        // 첫 번째 엔트리가 보통 메인 HTML 문서입니다.
         let htmlContent = zipEntries[0].getData().toString('utf8');
         
-        // 3. Cheerio로 실적 데이터 파싱
         const $ = cheerio.load(htmlContent);
         let revenue = null, op = null, net = null;
 
-        // 실적 공시(매출액또는손익구조변경)는 보통 특정 테이블에 값이 몰려있습니다.
+        const formatToEok = (valStr) => {
+            if (!valStr || valStr.trim() === '-') return "0억원";
+            const num = parseFloat(valStr.replace(/,/g, ''));
+            if (isNaN(num)) return valStr;
+            const eok = (num / 100000000).toFixed(1); 
+            return `${eok}억원`;
+        };
+
+        // 1. 모든 테이블을 순회
         $('table').each((_, table) => {
-            const rows = $(table).find('tr');
+            // 2. 해당 테이블 내의 모든 tr(행)을 찾음
+            const rows = $(table).find('tr'); 
+            
             rows.each((__, tr) => {
                 const tds = $(tr).find('td');
-                if (tds.length >= 4) {
-                    // 텍스트 정제 (공백 제거)
+                
+                // HTML 구조상 colspan="2"가 첫 번째 td이므로 
+                // 전체 td 개수는 6개(또는 5개 이상)입니다.
+                if (tds.length >= 5) {
                     const title = $(tds[0]).text().replace(/\s/g, '');
                     
-                    // 증감률 컬럼 (보통 5번째 칸에 해당하며, % 문자가 포함된 칸을 우선 탐색)
-                    let ratio = "";
-                    $(tds).each((i, td) => {
-                        const txt = $(td).text().trim();
-                        if (txt.includes('%') || (i >= 4 && /^-?[\d,.]+$/.test(txt))) {
-                            ratio = txt;
-                        }
-                    });
+                    // 인덱스 맵핑 (HTML 기준):
+                    // tds[0]: 항목명 (- 영업이익)
+                    // tds[1]: 당기금액
+                    // tds[2]: 전기금액
+                    // tds[3]: 증감금액 (8,841,391,689)
+                    // tds[4]: 증감비율 (86.3)
 
-                    if (title.includes('매출액')) revenue = ratio;
-                    if (title.includes('영업이익')) op = ratio;
-                    if (title.includes('당기순이익')) net = ratio;
+                    const changeAmountRaw = $(tds[3]).text().trim();
+                    const ratioRaw = $(tds[4]).text().trim();
+
+                    if (changeAmountRaw && changeAmountRaw !== '-') {
+                        const amountEok = formatToEok(changeAmountRaw);
+                        const resultText = `${amountEok} (${ratioRaw}%)`;
+
+                        if (title.includes('매출액')) revenue = resultText;
+                        else if (title.includes('영업이익')) op = resultText;
+                        else if (title.includes('당기순이익')) net = resultText;
+                    }
                 }
             });
-            if (revenue || op || net) return false; // 데이터를 찾았으면 중환
+
+            // 값을 하나라도 찾았다면 더 이상 다른 테이블을 뒤지지 않고 종료
+            if (revenue || op || net) return false; 
         });
 
         return { revenue, op, net };
     } catch (e) {
         console.error(`[API 본문추출 실패] rcpNo: ${rcpNo}, Error: ${e.message}`);
-        return {};
+        return { revenue: 'N/A', op: 'N/A', net: 'N/A' };
     }
 }
 
@@ -203,8 +217,8 @@ function isMarketOpen() {
     // 토요일(6), 일요일(0)은 장이 열리지 않음
     if (day === 0 || day === 6) return false;
 
-    // 한국 시간 기준 08:30 ~ 18:00 (시간외 거래 포함)
-    return currentTime >= 830 && currentTime <= 2030;
+    // 한국 시간 기준 07:50 ~ 20:10 (시간외 거래 포함)
+    return currentTime >= 750 && currentTime <= 2010;
 }
 /* ======================
     🚀 통합 스캔 엔진 (오류 수정 및 로직 최적화)
@@ -268,13 +282,56 @@ async function scanDart(totalCount = 10, isTest = false, targetDate = null) {
                 if (/매출액|손익구조|영업실적/.test(title)) {
                     if (isMarketOpen() && !isTest) continue;
 
+                    // 1. 괄호 안의 비율(%) 숫자만 추출하는 함수
+                    const getRatio = (str) => {
+                        if (!str) return 0;
+                        // 괄호 ( ) 안의 내용만 추출
+                        const match = str.match(/\(([^)]+)\)/);
+                        if (!match) return 0;
+                        
+                        // 숫자, 마이너스(-), 소수점(.) 외에 % 등 모든 문자 제거
+                        const cleaned = match[1].replace(/[^0-9.-]/g, '');
+                        return parseFloat(cleaned) || 0;
+                    };
+
+                    // 헬퍼 함수: "149.5억원 (86.3%)" 문자열에서 숫자만 뽑아내는 기능
+                    const getNum = (str) => {
+                        if (!str) return 0;
+                        // 숫자, 마이너스 부호, 소수점만 남기고 제거
+                        const cleaned = str.split('억원')[0].replace(/[^0-9.-]/g, '');
+                        return parseFloat(cleaned) || 0;
+                    };
+
+                    
                     const e = await getEarningsFromMainPage(rcpNo);
+
+                    // 모든 데이터가 없으면 스킵
                     if (!e.revenue && !e.op && !e.net) continue;
 
-                    if( (e.op.trim() === '' || Math.abs(parseFloat(e.op)) < 100)){
-                        continue;
-                    }else
-                    if( (e.net.trim() === '' || Math.abs(parseFloat(e.net)) < 100)){
+                    const opRatio = getRatio(e.op);   // 영업이익 증감률 (%)
+                    const netRatio = getRatio(e.net); // 당기순이익 증감률 (%)
+                    const opVal = getNum(e.op);       // 영업이익 증감액 (억원)
+
+                    console.log(`[실적분석] 매출: ${e.revenue}, 증감액: ${opVal}, 증감률: ${opRatio}`);
+                    // 2. 영업이익 증감률이 마이너스(-)이거나 데이터가 없으면 스킵
+                    // 예: " ( -77.3%)" -> -77.3 이므로 0보다 작아서 스킵됨
+                    // 단, 70% 미만이면서 영업이익이 100억원 미만인 경우도 스킵
+                    if (!e.op || opRatio < 70) {                        
+                        console.log(`[스킵] 영업이익 100미만 및 증감률 ${opRatio}%`);
+                        continue;                         
+                    }
+                    
+                    if(!e.op || opRatio >= 70) {
+                        if (opVal < 100) {
+                            console.log(`[스킵] 영업이익 100미만 및 증감률 ${opRatio}%`);
+                            continue;
+                        }
+                    }                    
+                    
+
+                    // 3. 당기순이익 증감률이 마이너스(-)이거나 데이터가 없으면 스킵
+                    if (!e.net || netRatio < 0) {
+                        console.log(`[스킵] 당기순이익 감소 또는 적자: ${netRatio}%`);
                         continue;
                     }
 
@@ -283,7 +340,7 @@ async function scanDart(totalCount = 10, isTest = false, targetDate = null) {
 
 🏢 <b>${corp}</b>
 📄 ${title}
-
+📄 전송시간: ${timeNow}
 📈 매출액: <b>${e.revenue ?? '-'}%</b>
 📉 영업이익: <b>${e.op ?? '-'}%</b>
 📉 순이익: <b>${e.net ?? '-'}%</b>
@@ -343,7 +400,7 @@ async function scanDart(totalCount = 10, isTest = false, targetDate = null) {
                     if (isPass) {
                         const link = `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rcpNo}`;
                         await bot.sendMessage(targetChatId,
-                            `🚨 <b>[DART ${tag}]</b>\n\n🏢 <b>기업명:</b> ${corp}\n📄 <b>공시제목:</b> ${title}${extraInfo}\n\n🔗 <a href="${link}">원문 보기</a>`,
+                            `🚨 <b>[DART ${tag}]</b>\n\n<b>기업명:</b> ${corp}\n📄 <b>공시제목:</b> ${title}${extraInfo}\n🏢 <b>전송시간:${timeNow}</b>\n\n🔗 <a href="${link}">원문 보기</a>`,
                             { parse_mode: 'HTML', disable_web_page_preview: true }
                         );
                     }
