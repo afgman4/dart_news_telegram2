@@ -444,6 +444,28 @@ bot.onText(/\/test1000(?:\s+(\d{8}))?/, async (msg, match) => {
     bot.sendMessage(targetChatId, `✅ <b>시뮬레이션 완료</b>`);
 });
 
+/* ======================
+    ℹ️ 도움말 처리
+====================== */
+bot.onText(/\/help/, (msg) => {
+    const chatId = msg.chat.id;
+    const helpMessage = 
+        `📖 <b>실시간 실적 모니터링 봇 가이드</b>\n\n` +
+        `🤖 <b>기본 명령어</b>\n` +
+        `  /on - 실시간 모니터링 가동 (15초 주기)\n` +
+        `  /off - 모니터링 즉시 중지\n` +
+        `  /help - 명령어 도움말 보기\n\n` +
+        `📊 <b>분석 및 테스트</b>\n` +
+        `  /test1000 - 오늘 기준 최신 1,000건 분석\n` +
+        `  /test1000 20250130 - 특정일 기준 1,000건 분석\n\n` +
+        `⚡ <b>필터링 기준 (영업이익)</b>\n` +
+        `  ✅ <b>성장률 80% 이상</b>만 알림\n` +
+        `  ❌ 적자 기업(전환 포함)은 자동 SKIP\n` +
+        `  💰 모든 금액은 <b>'억원'</b> 단위 환산`;
+
+    bot.sendMessage(chatId, helpMessage, { parse_mode: 'HTML' });
+});
+
 bot.on('polling_error', (err) => console.log('Polling Error:', err.code));
 
 console.log('🚀 DART Intelligent Bot is Online...');
