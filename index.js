@@ -1,3 +1,14 @@
+/**
+ * 1. 시스템 설정 및 에러 방지 (파일 맨 위에 위치해야 함)
+ */
+process.env.NTBA_FIX_319 = 1; // 경고 메시지 제거
+
+const dns = require('dns');
+// Node.js 18+ 환경에서 IPv6 충돌로 인한 AggregateError 방지
+if (dns.setDefaultResultOrder) {
+    dns.setDefaultResultOrder('ipv4first');
+}
+
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const moment = require('moment');
@@ -7,11 +18,25 @@ const cheerio = require('cheerio'); // <--- 이 줄을 꼭 추가하세요!
 /* ======================
     🔑 기본 설정 (반드시 본인 것으로 변경)
 ====================== */
-const TELEGRAM_TOKEN = '';
+const token = '';
 const DART_API_KEY = '';
 const DART_LIST_URL = 'https://opendart.fss.or.kr/api/list.json';
 
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+// 3. 봇 객체 생성 (이 부분을 아래와 같이 수정하세요)
+const bot = new TelegramBot(token, {
+    polling: {
+        autoStart: true,
+        params: {
+            timeout: 10 // 폴링 타임아웃을 10초로 설정
+        }
+    },
+    request: {
+        agentOptions: {
+            family: 4,           // 반드시 IPv4만 사용하도록 강제
+            keepAlive: true      // 연결 유지 (서버 안정성 향상)
+        }
+    }
+});
 
 let isMonitoring = false;
 let monitorTimer = null;
