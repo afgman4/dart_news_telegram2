@@ -1,6 +1,7 @@
 /**
  * 1. 시스템 설정 및 에러 방지 (파일 맨 위에 위치해야 함)
  */
+require('dotenv').config(); // <--- 이 줄을 맨 위에 추가하세요!
 process.env.NTBA_FIX_319 = 1; // 경고 메시지 제거
 
 const dns = require('dns');
@@ -18,8 +19,8 @@ const cheerio = require('cheerio'); // <--- 이 줄을 꼭 추가하세요!
 /* ======================
     🔑 기본 설정 (반드시 본인 것으로 변경)
 ====================== */
-const token = '';
-const DART_API_KEY = '';
+const token = process.env.TELEGRAM_TOKEN; // 수정됨
+const DART_API_KEY = process.env.DART_API_KEY; // 수정됨
 const DART_LIST_URL = 'https://opendart.fss.or.kr/api/list.json';
 
 // 3. 봇 객체 생성 (이 부분을 아래와 같이 수정하세요)
